@@ -3,6 +3,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -21,6 +22,7 @@ import { readCodexQuotaStatus } from "./codex-rate-limits.mjs";
 
 const injectorPath = fileURLToPath(import.meta.url);
 const projectRoot = path.resolve(path.dirname(injectorPath), "..");
+const isWindows = process.platform === "win32";
 const defaultCodexDebuggingPort = 9229;
 const injectionPath = path.join(projectRoot, "inject", "codex-taskboard.user.js");
 const automationPoliciesPath = path.join(projectRoot, ".data", "codex-automation-policies.json");
@@ -58,7 +60,7 @@ function parseArgs(argv) {
     startupToken: null,
     daemon: false,
     screenshot: null,
-    appPath: "/Applications/ChatGPT.app",
+    appPath: isWindows ? null : "/Applications/ChatGPT.app",
   };
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -185,10 +187,47 @@ function createTaskboardSupervisor({ detached }) {
 }
 
 function codexIsRunning() {
+  if (isWindows) return windowsCodexIsRunning();
   return spawnSync("/usr/bin/pgrep", ["-x", "ChatGPT"], { stdio: "ignore" }).status === 0;
 }
 
+function windowsCodexIsRunning() {
+  const result = spawnSync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process -Filter \"name='ChatGPT.exe'\" | Select-Object -First 1 -ExpandProperty ProcessId",
+  ], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+  return result.status === 0 && /\d/.test(result.stdout);
+}
+
+function windowsCodexExePath() {
+  // 1. Try a running ChatGPT.exe (main process, no --type= flag)
+  const runningResult = spawnSync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process -Filter \"name='ChatGPT.exe'\" | Where-Object { $_.CommandLine -notmatch '--type=' } | Select-Object -First 1 -ExpandProperty ExecutablePath",
+  ], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+  if (runningResult.status === 0) {
+    const exePath = runningResult.stdout.trim();
+    if (exePath) return exePath;
+  }
+  // 2. Try the installed Appx package location
+  const appxResult = spawnSync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-AppxPackage | Where-Object { $_.Name -like '*OpenAI*' -or $_.Name -like '*Codex*' } | Select-Object -First 1 -ExpandProperty InstallLocation",
+  ], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+  if (appxResult.status === 0) {
+    const installDir = appxResult.stdout.trim();
+    if (installDir) {
+      const candidate = path.join(installDir, "app", "ChatGPT.exe");
+      try {
+        if (existsSync(candidate)) return candidate;
+      } catch {}
+    }
+  }
+  return null;
+}
+
 function launchCodex(appPath, port) {
+  if (isWindows) return windowsLaunchCodex(appPath, port);
   return spawn(
     "/usr/bin/open",
     [
@@ -201,6 +240,47 @@ function launchCodex(appPath, port) {
     ],
     { stdio: "ignore" },
   );
+}
+
+function windowsCodexAumid() {
+  const result = spawnSync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-AppxPackage | Where-Object { $_.Name -like '*OpenAI*' -or $_.Name -like '*Codex*' } | Select-Object -First 1 -ExpandProperty PackageFamilyName",
+  ], { encoding: "utf8", stdio: ["pipe", "pipe", "ignore"] });
+  if (result.status !== 0) return null;
+  const familyName = result.stdout.trim();
+  return familyName ? `${familyName}!App` : null;
+}
+
+function windowsLaunchCodex(appPath, port) {
+  const cdpArgs = [
+    `--remote-debugging-port=${port}`,
+    `--remote-allow-origins=http://127.0.0.1:${port}`,
+  ];
+  // MSIX (Windows Store) apps must be activated through shell:AppsFolder
+  // so the app:// protocol and package context register correctly.
+  // Spawning the .exe directly bypasses activation and the renderer fails to load.
+  if (!appPath) {
+    const aumid = windowsCodexAumid();
+    if (aumid) {
+      const appRef = `shell:AppsFolder\\${aumid}`;
+      const argList = cdpArgs.map((a) => `'${a}'`).join(",");
+      // detached + shell so the MSIX app survives the powershell child exiting;
+      // Start-Process activates the Store app with its proper package context.
+      return spawn(
+        "powershell",
+        ["-NoProfile", "-Command", `Start-Process -FilePath '${appRef}' -ArgumentList ${argList}`],
+        { stdio: "ignore", detached: true, shell: true },
+      );
+    }
+  }
+  // Fallback: launch the exe directly (works for non-Store / portable installs)
+  const exePath = appPath ?? windowsCodexExePath();
+  if (!exePath) {
+    throw new Error("Could not find ChatGPT.exe. Use --app-path to specify it explicitly.");
+  }
+  const appDir = path.dirname(exePath);
+  return spawn(exePath, cdpArgs, { stdio: "ignore", detached: false, cwd: appDir });
 }
 
 class CdpConnection {
@@ -310,8 +390,60 @@ async function codexTargets(port) {
   );
 }
 
+function windowsProcessList() {
+  const result = spawnSync("powershell", [
+    "-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process | Select-Object ProcessId,CommandLine | ConvertTo-Csv -NoTypeInformation",
+  ], { encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  if (result.status !== 0) return "";
+  const lines = result.stdout.split("\r\n").filter(Boolean);
+  if (lines.length < 2) return "";
+  const header = parseCsvRow(lines[0]);
+  const pidIdx = header.indexOf("ProcessId");
+  const cmdIdx = header.indexOf("CommandLine");
+  if (pidIdx < 0 || cmdIdx < 0) return "";
+  const out = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols = parseCsvRow(lines[i]);
+    const pid = cols[pidIdx]?.trim();
+    const cmd = cols[cmdIdx] ?? "";
+    if (pid && /^\d+$/.test(pid)) out.push(`${pid} ${cmd}`);
+  }
+  return out.join("\n");
+}
+
+function parseCsvRow(line) {
+  const cols = [];
+  let cur = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = false;
+      } else cur += ch;
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === ',') { cols.push(cur); cur = ""; }
+      else cur += ch;
+    }
+  }
+  cols.push(cur);
+  return cols;
+}
+
 function codexDebuggingPorts(preferredPort) {
   const ports = new Set([preferredPort]);
+  if (isWindows) {
+    const processList = windowsProcessList();
+    for (const line of processList.split("\n")) {
+      if (!line.includes("ChatGPT.exe") && !line.includes("Codex.exe")) continue;
+      const match = line.match(/--remote-debugging-port=(\d+)/);
+      if (match) ports.add(Number(match[1]));
+    }
+    return [...ports];
+  }
   const processes = spawnSync("/bin/ps", ["-axo", "command="], {
     encoding: "utf8",
     maxBuffer: 4 * 1024 * 1024,
@@ -327,6 +459,11 @@ function codexDebuggingPorts(preferredPort) {
 }
 
 function processCwd(pid) {
+  if (isWindows) {
+    // Windows has no reliable lsof equivalent for CWD.
+    // Return null so resident-injector matching falls back to absolute-path only.
+    return null;
+  }
   const result = spawnSync("/usr/sbin/lsof", [
     "-a",
     "-p",
@@ -344,13 +481,15 @@ function processCwd(pid) {
 }
 
 function residentInjectorPids(port) {
-  const processes = spawnSync("/bin/ps", ["-axo", "pid=,command="], {
-    encoding: "utf8",
-    maxBuffer: 4 * 1024 * 1024,
-  });
-  if (processes.status !== 0) return [];
+  const processList = isWindows
+    ? windowsProcessList()
+    : spawnSync("/bin/ps", ["-axo", "pid=,command="], {
+        encoding: "utf8",
+        maxBuffer: 4 * 1024 * 1024,
+      }).stdout;
+  if (!processList) return [];
   return findResidentInjectorPids({
-    processList: processes.stdout,
+    processList,
     currentPid: process.pid,
     injectorPath,
     projectRoot,
@@ -1260,6 +1399,60 @@ async function main() {
     if (!cdpReachable) {
       codexProcess = launchCodex(options.appPath, options.port);
       await waitUntilReachable(cdpVersionUrl, 30_000);
+      // On Windows the renderer pages may not be registered yet when /json/version
+      // first responds, and early targets can be transient (destroyed during
+      // Codex startup). Wait until targets are stable for 2 consecutive checks.
+      if (isWindows) {
+        const deadline = Date.now() + 45_000;
+        let stableCount = 0;
+        let lastIds = "";
+        while (Date.now() < deadline) {
+          const targets = await codexTargets(options.port);
+          if (targets.length > 0) {
+            const ids = targets.map((t) => t.id).sort().join(",");
+            if (ids === lastIds) {
+              stableCount++;
+              if (stableCount >= 2) break;
+            } else {
+              stableCount = 0;
+              lastIds = ids;
+            }
+          } else {
+            stableCount = 0;
+            lastIds = "";
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        // Wait for the renderer's document to reach "complete" readyState.
+        // On Windows the renderer is still loading its app framework when
+        // targets first stabilize; injecting too early causes the iframe to fail.
+        const readyDeadline = Date.now() + 30_000;
+        while (Date.now() < readyDeadline) {
+          try {
+            const targets = await codexTargets(options.port);
+            const main = targets.find((t) => !t.url?.includes("avatar-overlay"));
+            if (main) {
+              const cdp = new CdpConnection(main.webSocketDebuggerUrl);
+              await cdp.open();
+              try {
+                const result = await cdp.send("Runtime.evaluate", {
+                  expression: "document.readyState",
+                  returnByValue: true,
+                });
+                if (result.result?.value === "complete") {
+                  cdp.close();
+                  break;
+                }
+              } catch {}
+              cdp.close();
+            }
+          } catch {}
+          await new Promise((resolve) => setTimeout(resolve, 1_000));
+        }
+        // Start-Process launches the app asynchronously; the powershell child
+        // has already exited and does not represent the Codex process lifetime.
+        codexProcess = null;
+      }
     }
 
     const { source, sourceHash } = await currentInjectionSource();
