@@ -25,7 +25,7 @@ const COMMAND_OPTIONS = new Map([
   ["cloud login", new Set(["url", "actor-name", "json"])],
   ["cloud status", new Set(["json"])],
   ["cloud logout", new Set(["json"])],
-  ["issue list", new Set(["project", "status", "json"])],
+  ["issue list", new Set(["project", "status", "archived", "json"])],
   ["issue get", new Set(["json"])],
   [
     "issue create",
@@ -41,6 +41,7 @@ const COMMAND_OPTIONS = new Map([
       "git-branch",
       "worktree-path",
       "worktree-branch",
+      "start-date",
       "due-date",
       "recurrence-interval",
       "recurrence-unit",
@@ -50,6 +51,7 @@ const COMMAND_OPTIONS = new Map([
   [
     "issue update",
     new Set([
+      "project",
       "title",
       "description",
       "description-file",
@@ -60,6 +62,7 @@ const COMMAND_OPTIONS = new Map([
       "git-branch",
       "worktree-path",
       "worktree-branch",
+      "start-date",
       "due-date",
       "recurrence-interval",
       "recurrence-unit",
@@ -189,7 +192,7 @@ async function execute(parsed, overrides) {
   const api = createApiClient(overrides, {
     baseUrl: usesCompanionControl || env.CODEX_TASKBOARD_COMPANION_URL !== undefined
       ? resolveCompanionUrl(env)
-      : undefined,
+      : await resolveTaskboardBaseUrl(env, overrides),
   });
   switch (command) {
     case "project list":
@@ -306,13 +309,13 @@ function createApiClient(overrides, { baseUrl: explicitBaseUrl } = {}) {
   }
 
   const env = overrides.env ?? process.env;
-  const baseUrl = normalizeBaseUrl(explicitBaseUrl ?? env.CODEX_TASKBOARD_URL ?? DEFAULT_API_URL);
+  const baseUrl = normalizeBaseUrl(explicitBaseUrl ?? DEFAULT_API_URL);
 
   return {
     async request(method, pathname, body) {
       let response;
       try {
-        response = await fetchImplementation(new URL(pathname, `${baseUrl}/`), {
+        response = await fetchImplementation(resolveApiUrl(baseUrl, pathname), {
           method,
           headers: {
             accept: "application/json",
@@ -349,7 +352,7 @@ function createApiClient(overrides, { baseUrl: explicitBaseUrl } = {}) {
     async download(pathname) {
       let response;
       try {
-        response = await fetchImplementation(new URL(pathname, `${baseUrl}/`), {
+        response = await fetchImplementation(resolveApiUrl(baseUrl, pathname), {
           headers: {
             accept: "*/*",
             "x-taskboard-client": "taskctl",
@@ -477,9 +480,13 @@ async function listIssues(api, options) {
   if (options.status !== undefined) {
     assertStatus(options.status);
   }
+  if (options.archived !== undefined && !["true", "false", "all"].includes(options.archived)) {
+    throw usageError("--archived must be true, false, or all");
+  }
   const search = new URLSearchParams();
   if (options.project !== undefined) search.set("projectId", options.project);
   if (options.status !== undefined) search.set("status", options.status);
+  if (options.archived !== undefined) search.set("archived", options.archived);
   const query = search.size > 0 ? `?${search}` : "";
   return api.request("GET", `/api/tasks${query}`);
 }
@@ -502,6 +509,7 @@ async function createIssue(api, options, overrides) {
     labels: parseLabels(options.labels),
     threadId,
     ...optionalField("developmentContext", developmentContext),
+    ...optionalField("startDate", options["start-date"]),
     ...optionalField("dueDate", options["due-date"]),
     ...optionalField("recurrence", recurrence),
   });
@@ -515,11 +523,13 @@ async function updateIssue(api, taskId, options, overrides) {
   const recurrence = recurrenceFromOptions(options);
   const threadId = resolveThreadId(options, overrides);
   const patch = {
+    ...optionalField("projectId", options.project),
     ...optionalField("title", options.title),
     ...optionalField("status", options.status),
     ...optionalField("priority", options.priority),
     ...optionalField("labels", options.labels === undefined ? undefined : parseLabels(options.labels)),
     ...optionalField("developmentContext", developmentContext),
+    ...optionalField("startDate", options["start-date"]),
     ...optionalField("dueDate", options["due-date"]),
     ...optionalField("recurrence", recurrence),
   };
@@ -774,6 +784,34 @@ function normalizeBaseUrl(rawUrl) {
   url.search = "";
   url.hash = "";
   return url.toString().replace(/\/$/, "");
+}
+
+function resolveApiUrl(baseUrl, pathname) {
+  return new URL(pathname.replace(/^\//, ""), `${baseUrl}/`);
+}
+
+async function resolveTaskboardBaseUrl(env, overrides) {
+  if (env.CODEX_TASKBOARD_URL !== undefined) return env.CODEX_TASKBOARD_URL;
+  const descriptorPath = env.CODEX_TASKBOARD_RUNTIME_FILE;
+  if (!descriptorPath) return DEFAULT_API_URL;
+  let descriptor;
+  try {
+    const read = overrides.readFile ?? readFile;
+    descriptor = JSON.parse(await read(descriptorPath, "utf8"));
+  } catch (error) {
+    throw new TaskctlError("Cannot read the active Taskboard launcher endpoint", {
+      code: "SERVICE_UNAVAILABLE",
+      exitCode: 3,
+      details: error instanceof Error ? error.message : String(error),
+    });
+  }
+  if (descriptor?.version !== 1 || typeof descriptor.url !== "string") {
+    throw new TaskctlError("The active Taskboard launcher endpoint is invalid", {
+      code: "INVALID_RESPONSE",
+      exitCode: 4,
+    });
+  }
+  return descriptor.url;
 }
 
 function resolveCompanionUrl(env) {

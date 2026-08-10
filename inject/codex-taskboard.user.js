@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "0.6.8";
+  const VERSION = "0.6.13";
   const SOURCE_HASH = window.__CODEX_TASKBOARD_SOURCE_HASH__;
   const SENTINEL_KEY = "__codexTaskboardInjection__";
   const DEFAULT_TASKBOARD_URL = "http://127.0.0.1:47823/?host=codex";
@@ -17,8 +17,11 @@
   const HIDDEN_ATTRIBUTE = "data-codex-taskboard-native-hidden";
   const HOST_ATTRIBUTE = "data-codex-taskboard-page-host";
   const NATIVE_SELECTED_ATTRIBUTE = "data-codex-taskboard-native-selected";
-  const HOST_BINDING_NAME = "__codexTaskboardHostV1";
-  const HOST_HEARTBEAT_NAME = "__codexTaskboardHostHeartbeatV1";
+  const HOST_REQUEST_MESSAGE = "__codexTaskboardHostRequestV1";
+  const HOST_RESPONSE_MESSAGE = "__codexTaskboardHostResponseV1";
+  const HOST_HEARTBEAT_MESSAGE = "__codexTaskboardHostHeartbeatV1";
+  const HOST_STARTUP_TOKEN_NAME = "__codexTaskboardHostStartupTokenV1";
+  const HOST_CAPABILITY = window.__CODEX_TASKBOARD_HOST_CAPABILITY__;
   const REATTACH_DELAY_MS = 160;
   const FRAME_READY_TIMEOUT_MS = 12_000;
   const HOST_REQUEST_TIMEOUT_MS = 12_000;
@@ -28,6 +31,7 @@
   const PLUGIN_LABELS = ["插件", "plugins"];
   const NATIVE_PAGE_LABELS = [
     "新建任务",
+    "新对话",
     "new task",
     "new chat",
     "拉取请求",
@@ -59,18 +63,26 @@
   let noDragRight = null;
   let status = null;
   let frameOrigin = "";
+  let taskboardOrigin = "";
+  let frameTaskboardUrl = "";
+  let frameCapability = "";
+  let frameChallenge = "";
   let frameReady = false;
   let frameReadyWaiters = new Set();
   let hostRequests = new Map();
   let hostRequestSequence = 0;
+  let hostHeartbeatAt = 0;
   let observer = null;
   let reattachTimer = null;
+  let hostContextTimer = null;
   let lastFocusedElement = null;
   let hostContextSnapshot = null;
   let mutedNativeSelections = new Map();
   let openGeneration = 0;
   let pendingThreadCreation = null;
   let lastNativeThreadId = "";
+  let lastNativeProjectId = "";
+  let suspendedNativeBrowserPanel = null;
   let active = false;
   let destroyed = false;
 
@@ -305,13 +317,10 @@
     const viewport = document.querySelector("[data-app-shell-main-content-layout]");
     if (!viewport) return null;
     const viewportRect = viewport.getBoundingClientRect();
-    const headerBottom = document.querySelector("main > header")?.getBoundingClientRect().bottom
-      ?? viewportRect.top;
     return Array.from(viewport.children).find((candidate) => {
       const rect = candidate.getBoundingClientRect();
       return rect.width >= viewportRect.width * 0.8
-        && rect.height >= viewportRect.height * 0.7
-        && rect.top >= headerBottom - 1;
+        && rect.height >= viewportRect.height * 0.7;
     }) || null;
   }
 
@@ -385,6 +394,13 @@
       || null;
   }
 
+  async function selectedNativeProjectId() {
+    const bootstrap = await window.electronBridge?.getInitialSidebarBootstrap?.();
+    const selectedProject = bootstrap?.globalStateEntries
+      ?.find((entry) => entry.key === "selected-project")?.value;
+    return typeof selectedProject?.projectId === "string" ? selectedProject.projectId : "";
+  }
+
   function readCodexProjects() {
     const seen = new Set();
     return Array.from(document.querySelectorAll("[data-app-action-sidebar-project-row]"))
@@ -421,6 +437,9 @@
   }
 
   async function captureHostContext() {
+    const todoProgress = nativeTodoProgress();
+    const selectedProjectId = await selectedNativeProjectId();
+    if (selectedProjectId) lastNativeProjectId = selectedProjectId;
     let projects = readCodexProjects();
     let section = findProjectsSection();
     const sectionDeadline = Date.now() + 1_200;
@@ -442,7 +461,8 @@
         projects = readCodexProjects();
       } while ((projects.length === 0 || !activeThreadRow()) && Date.now() < deadline);
     }
-    const context = readHostContext(projects);
+    const context = readHostContext(projects, lastNativeProjectId);
+    if (context.threadRunning && todoProgress) context.threadTodoProgress = todoProgress;
     expandedSections.forEach((candidate) => {
       if (candidate.isConnected && candidate.getAttribute("data-app-action-sidebar-section-collapsed") === "false") {
         candidate.querySelector("[data-app-action-sidebar-section-toggle]")?.click();
@@ -480,6 +500,71 @@
   function nativeSidebarCollapsed() {
     const label = normalizedLabel(nativeSidebarTrigger()?.getAttribute("aria-label"));
     return label.startsWith("显示") || label.startsWith("show ");
+  }
+
+  function sidebarThreadRow(threadId) {
+    const normalizedThreadId = normalizeThreadId(threadId);
+    if (!normalizedThreadId) return null;
+    return Array.from(document.querySelectorAll("[data-app-action-sidebar-thread-id]"))
+      .find((candidate) => normalizeThreadId(
+        candidate.getAttribute("data-app-action-sidebar-thread-id"),
+      ) === normalizedThreadId) || null;
+  }
+
+  function nativeRunningThreadRow(preferredThreadId, preferredProjectId) {
+    const rows = Array.from(document.querySelectorAll(".sidebar-item .animate-spin"))
+      .map((spinner) => spinner.closest("[data-app-action-sidebar-thread-id]"))
+      .filter(Boolean);
+    const normalizedPreferredThreadId = normalizeThreadId(preferredThreadId);
+    if (normalizedPreferredThreadId) {
+      return rows.find((candidate) => normalizeThreadId(
+        candidate.getAttribute("data-app-action-sidebar-thread-id"),
+      ) === normalizedPreferredThreadId) || null;
+    }
+    if (preferredProjectId) {
+      const projectRows = rows.filter((candidate) => (
+        candidate.closest("[data-app-action-sidebar-project-list-id]")
+          ?.getAttribute("data-app-action-sidebar-project-list-id") === preferredProjectId
+      ));
+      if (projectRows.length === 1) return projectRows[0];
+    }
+    return rows.length === 1 ? rows[0] : null;
+  }
+
+  function nativeThreadRunning(threadId) {
+    const normalizedThreadId = normalizeThreadId(threadId);
+    const threadRow = sidebarThreadRow(normalizedThreadId);
+    if (threadRow?.querySelector(".animate-spin")) return true;
+    const running = Array.from(document.querySelectorAll("button[aria-label]")).some((button) => {
+      const label = normalizedLabel(button.getAttribute("aria-label"));
+      return ["停止", "停止生成", "stop", "stop generating"].includes(label);
+    });
+    const activeThreadId = normalizeThreadId(
+      activeThreadRow()?.getAttribute("data-app-action-sidebar-thread-id"),
+    );
+    if (running && (!normalizedThreadId || activeThreadId === normalizedThreadId)) return true;
+    if (threadRow) return false;
+    const composer = document.querySelector(
+      "[contenteditable='true'][role='textbox'], textarea",
+    );
+    return composer ? false : undefined;
+  }
+
+  function nativeTodoProgress() {
+    const indicator = Array.from(
+      document.querySelectorAll('[data-in-progress-fixed-content="true"]'),
+    ).at(-1);
+    const label = Array.from(indicator?.querySelectorAll("span") ?? [])
+      .map((element) => element.textContent?.trim() ?? "")
+      .find((text) => /\d+\s*\/\s*\d+/.test(text));
+    const match = label?.match(/(\d+)\s*\/\s*(\d+)/);
+    if (!match) return null;
+    const current = Number(match[1]);
+    const total = Number(match[2]);
+    return {
+      completed: Math.max(0, Math.min(total, current - 1)),
+      total,
+    };
   }
 
   function expandNativeSidebar() {
@@ -523,19 +608,29 @@
     };
   }
 
-  function readHostContext(projects = readCodexProjects()) {
+  function readHostContext(projects = readCodexProjects(), preferredProjectId = lastNativeProjectId) {
     const row = activeThreadRow();
     const activeThreadId = normalizeThreadId(row?.getAttribute("data-app-action-sidebar-thread-id"));
-    if (activeThreadId) lastNativeThreadId = activeThreadId;
-    const threadId = activeThreadId || lastNativeThreadId || normalizeThreadId(threadIdFromLocation());
     const projectList = row?.closest?.("[data-app-action-sidebar-project-list-id]");
     const projectRow = row?.closest?.("[data-app-action-sidebar-project-id]")
       || document.querySelector('[data-app-action-sidebar-project-row][aria-current="page"]')
       || document.querySelector('[data-app-action-sidebar-project-row][data-app-action-sidebar-project-active="true"]');
     const projectId = projectList?.getAttribute("data-app-action-sidebar-project-list-id")
       || projectRow?.getAttribute("data-app-action-sidebar-project-id")
+      || preferredProjectId
       || "";
+    const preferredThreadId = activeThreadId || lastNativeThreadId;
+    const runningThreadId = normalizeThreadId(
+      nativeRunningThreadRow(preferredThreadId, projectId)
+        ?.getAttribute("data-app-action-sidebar-thread-id"),
+    );
+    const currentThreadId = activeThreadId || runningThreadId || lastNativeThreadId;
+    if (activeThreadId || (!lastNativeThreadId && runningThreadId)) {
+      lastNativeThreadId = currentThreadId;
+    }
+    const threadId = currentThreadId || lastNativeThreadId || normalizeThreadId(threadIdFromLocation());
     const workspacePath = workspaceFromLocation();
+    const threadRunning = nativeThreadRunning(threadId);
     const payload = {
       theme: currentTheme(),
       projects,
@@ -543,19 +638,32 @@
       titlebarLeftInset: titlebarLeftInset(),
       sidebarCollapsed: nativeSidebarCollapsed(),
     };
+    if (threadRunning !== undefined) payload.threadRunning = threadRunning;
+    if (threadRunning) {
+      const todoProgress = nativeTodoProgress();
+      if (todoProgress) payload.threadTodoProgress = todoProgress;
+    }
     if (workspacePath) payload.workspacePath = workspacePath;
     if (projectId) payload.projectId = projectId;
     if (threadId) payload.threadId = threadId;
     return payload;
   }
 
-  function postToFrame(message) {
-    if (!frame?.contentWindow || !frameOrigin) return;
-    frame.contentWindow.postMessage(message, frameOrigin);
+  function postToFrame(message, allowUnready = false) {
+    if (!frame?.contentWindow || !frameOrigin || (!allowUnready && !frameReady)) return;
+    frame.contentWindow.postMessage(message, frameOrigin === "null" ? "*" : frameOrigin);
   }
 
   function dispatchHostMessage(message) {
     window.postMessage(message, window.location.origin);
+  }
+
+  function postFrameChallenge() {
+    if (!frameChallenge) return;
+    postToFrame({
+      type: "taskboard:frame-challenge",
+      payload: { challenge: frameChallenge },
+    }, true);
   }
 
   function postHostContext() {
@@ -631,33 +739,23 @@
     }
   }
 
-  async function waitForPreparedComposer(identifier, skillPath) {
+  async function waitForPreparedComposer(identifier) {
     const deadline = Date.now() + 8_000;
     while (Date.now() < deadline) {
       const editor = document.querySelector('[data-codex-composer="true"][contenteditable="true"]');
       if (editor && editor.getClientRects().length > 0) {
         const containsIdentifier = normalizedLabel(editor.textContent).includes(normalizedLabel(identifier));
-        const skillMention = Array.from(editor.querySelectorAll("[skill-mention-name]"))
-          .find((mention) => (
-            mention.getAttribute("skill-mention-name") === "manage-taskboard"
-            && mention.getAttribute("skill-mention-path") === skillPath
-          ));
-        if (containsIdentifier && skillMention) return editor;
+        if (containsIdentifier) return editor;
       }
       await new Promise((resolve) => window.setTimeout(resolve, 80));
     }
-    throw new Error("Codex 对话输入框没有生成 manage-taskboard Skill 引用");
+    throw new Error("Codex 对话输入框没有写入任务编号");
   }
 
   async function createThreadForTask(payload) {
     const taskId = typeof payload?.taskId === "string" ? payload.taskId.trim() : "";
     const identifier = typeof payload?.identifier === "string" ? payload.identifier.trim() : "";
     const instruction = typeof payload?.instruction === "string" ? payload.instruction.trim() : "";
-    const skillName = typeof payload?.skillName === "string" ? payload.skillName.trim() : "";
-    const skillDisplayName = typeof payload?.skillDisplayName === "string"
-      ? payload.skillDisplayName.trim()
-      : "";
-    const skillPath = typeof payload?.skillPath === "string" ? payload.skillPath.trim() : "";
     const workspacePath = typeof payload?.workspacePath === "string"
       ? payload.workspacePath.trim()
       : "";
@@ -665,9 +763,6 @@
       !taskId
       || !identifier
       || !instruction
-      || !skillName
-      || !skillDisplayName
-      || !skillPath
       || pendingThreadCreation
     ) return;
     pendingThreadCreation = taskId;
@@ -709,13 +804,8 @@
           focusComposerNonce: Date.now(),
         },
       });
-      await requestHostTaskComposerPrefill({
-        instruction,
-        skillDisplayName,
-        skillName,
-        skillPath,
-      });
-      await waitForPreparedComposer(identifier, skillPath);
+      await requestHostTaskComposerPrefill({ instruction });
+      await waitForPreparedComposer(identifier);
       postToFrame({ type: "taskboard:thread-prepared", payload: { taskId } });
     } catch (error) {
       postToFrame({
@@ -748,7 +838,7 @@
   async function handleAutomationRequest(payload) {
     const requestId = typeof payload?.requestId === "string" ? payload.requestId : "";
     if (!requestId) return;
-    if (!isLocalTaskboardOrigin(frameOrigin)) {
+    if (!isLocalTaskboardOrigin(taskboardOrigin)) {
       postToFrame({
         type: "taskboard:automation-response",
         payload: { requestId, ok: false, error: "仅本地任务面板可用" },
@@ -785,11 +875,38 @@
     }
   }
 
+  function handleExternalOpen(payload) {
+    try {
+      const url = new URL(payload?.url);
+      if (url.protocol !== "https:") return;
+      void requestHost("open-external", { url: url.href }).catch(() => {});
+    } catch (_) {}
+  }
+
+  function challengeFrameDocument(event) {
+    if (!frame || event.currentTarget !== frame) return;
+    frameReady = false;
+    frameChallenge = crypto.randomUUID();
+    if (active) showLoading();
+    postFrameChallenge();
+  }
+
   function onFrameMessage(event) {
     if (!frame || event.source !== frame.contentWindow || event.origin !== frameOrigin) return;
     const message = event.data;
-    if (!message || typeof message !== "object") return;
+    if (
+      !message
+      || typeof message !== "object"
+      || !frameCapability
+      || message.capability !== frameCapability
+    ) return;
+    if (message.type === "taskboard:frame-awaiting-challenge") {
+      postFrameChallenge();
+      return;
+    }
+    if (!frameChallenge || message.challenge !== frameChallenge) return;
     if (message.type === "taskboard:ready") {
+      if (frameReady) return;
       frameReady = true;
       frameReadyWaiters.forEach(({ resolve, timer }) => {
         window.clearTimeout(timer);
@@ -814,6 +931,10 @@
     }
     if (message.type === "taskboard:automation-request") {
       void handleAutomationRequest(message.payload);
+      return;
+    }
+    if (message.type === "taskboard:open-external") {
+      handleExternalOpen(message.payload);
       return;
     }
     if (message.type === "taskboard:create-thread") void createThreadForTask(message.payload);
@@ -941,6 +1062,9 @@
     cancelFrameReadyWaiters(new Error("任务面板正在重新加载"));
     frame?.remove();
     frame = null;
+    frameTaskboardUrl = "";
+    frameCapability = "";
+    frameChallenge = "";
     frameReady = false;
     if (dragRegion) dragRegion.hidden = true;
     if (noDragLeft) noDragLeft.hidden = true;
@@ -950,36 +1074,42 @@
     if (cacheBust) {
       taskboardUrl.searchParams.set(FRAME_REFRESH_PARAM, Date.now().toString(36));
     }
-    frameOrigin = taskboardUrl.origin;
+    taskboardOrigin = taskboardUrl.origin;
+    frameTaskboardUrl = taskboardUrl.href;
+    frameOrigin = "null";
+    const frameName = `codex-taskboard-${crypto.randomUUID()}`;
+    frameCapability = crypto.randomUUID();
     const nextFrame = document.createElement("iframe");
     nextFrame.id = FRAME_ID;
+    nextFrame.name = frameName;
     nextFrame.hidden = true;
-    nextFrame.src = taskboardUrl.href;
+    nextFrame.setAttribute("sandbox", "allow-scripts allow-forms allow-modals allow-downloads");
+    nextFrame.src = "about:blank";
     nextFrame.title = "任务面板";
     nextFrame.referrerPolicy = "no-referrer";
     nextFrame.setAttribute("allow", "clipboard-read; clipboard-write");
-    nextFrame.addEventListener("load", postHostContext);
+    nextFrame.addEventListener("load", challengeFrameDocument);
     frame = nextFrame;
     page.appendChild(nextFrame);
+    return { frameName, frameCapability };
   }
 
   function reloadFrame() {
     if (!frame) return false;
     const generation = ++openGeneration;
     if (active) showLoading();
-    loadTaskboardFrame(true);
-    if (active) {
-      void waitForFrameReady()
-        .then(() => {
+    const frameRequest = loadTaskboardFrame(true);
+    void requestHostLoadFrame(frameRequest)
+      .then(() => waitForFrameReady())
+      .then(() => {
           if (!active || generation !== openGeneration) return;
           showFrame();
           postHostContext();
-        })
-        .catch((error) => {
-          if (!active || generation !== openGeneration) return;
-          showLoadError(error.message);
-        });
-    }
+      })
+      .catch((error) => {
+        if (!active || generation !== openGeneration) return;
+        showLoadError(error.message);
+      });
     return true;
   }
 
@@ -995,14 +1125,13 @@
   }
 
   function hasLiveHostBinding() {
-    const heartbeat = Number(window[HOST_HEARTBEAT_NAME]);
-    return typeof window[HOST_BINDING_NAME] === "function"
-      && Number.isFinite(heartbeat)
-      && Date.now() - heartbeat <= HOST_HEARTBEAT_MAX_AGE_MS;
+    return typeof HOST_CAPABILITY === "string"
+      && HOST_CAPABILITY.length > 0
+      && Number.isFinite(hostHeartbeatAt)
+      && Date.now() - hostHeartbeatAt <= HOST_HEARTBEAT_MAX_AGE_MS;
   }
 
   function requestHost(action, payload = {}) {
-    const binding = window[HOST_BINDING_NAME];
     if (!hasLiveHostBinding()) {
       return Promise.reject(new Error("Taskboard 启动器未运行，无法操作 Codex 对话输入框"));
     }
@@ -1015,7 +1144,11 @@
       }, HOST_REQUEST_TIMEOUT_MS);
       hostRequests.set(id, { resolve, reject, timeout });
       try {
-        binding(JSON.stringify({ ...payload, id, action }));
+        window.postMessage({
+          type: HOST_REQUEST_MESSAGE,
+          capability: HOST_CAPABILITY,
+          payload: { ...payload, id, action },
+        }, window.location.origin);
       } catch (error) {
         window.clearTimeout(timeout);
         hostRequests.delete(id);
@@ -1031,24 +1164,20 @@
     return requestHost("ensure");
   }
 
-  function requestHostTaskComposerPrefill({
-    instruction,
-    skillDisplayName,
-    skillName,
-    skillPath,
-  }) {
+  function requestHostLoadFrame({ frameName, frameCapability: capability }) {
+    return requestHost("load-frame", { frameName, frameCapability: capability });
+  }
+
+  function requestHostTaskComposerPrefill({ instruction }) {
     return requestHost("prefill-task-composer", {
       instruction,
-      skillDisplayName,
-      skillName,
-      skillPath,
     });
   }
 
   function frameMatchesTaskboardUrl(taskboardUrl) {
-    if (!frame) return false;
+    if (!frame || !frameTaskboardUrl) return false;
     try {
-      const loadedUrl = new URL(frame.getAttribute("src") || frame.src);
+      const loadedUrl = new URL(frameTaskboardUrl);
       loadedUrl.searchParams.delete(FRAME_REFRESH_PARAM);
       const expectedUrl = new URL(taskboardUrl.href);
       expectedUrl.searchParams.delete(FRAME_REFRESH_PARAM);
@@ -1068,6 +1197,18 @@
     else pending.reject(new Error(response.error || "任务面板服务启动失败"));
   }
 
+  function onHostBridgeMessage(event) {
+    if (event.source !== window || event.origin !== window.location.origin) return;
+    const message = event.data;
+    if (!message || typeof message !== "object" || message.capability !== HOST_CAPABILITY) return;
+    if (message.type === HOST_HEARTBEAT_MESSAGE) {
+      hostHeartbeatAt = Number(message.at) || 0;
+      window[HOST_STARTUP_TOKEN_NAME] = message.startupToken ?? null;
+      return;
+    }
+    if (message.type === HOST_RESPONSE_MESSAGE) onHostResponse(message.response);
+  }
+
   async function prepareTaskboard(generation) {
     const taskboardUrl = resolveTaskboardUrl();
     const canReuseFrame = Boolean(
@@ -1084,10 +1225,17 @@
         captureHostContext(),
       ]);
       if (!active || generation !== openGeneration) return;
-      hostContextSnapshot = context;
+      hostContextSnapshot = {
+        ...hostContextSnapshot,
+        ...context,
+        projects: context.projects.length > 0
+          ? context.projects
+          : hostContextSnapshot?.projects ?? [],
+      };
       if (!frameReady || result.restarted || !frameMatchesTaskboardUrl(taskboardUrl)) {
         showLoading();
-        loadTaskboardFrame();
+        const frameRequest = loadTaskboardFrame();
+        await requestHostLoadFrame(frameRequest);
         await waitForFrameReady();
       }
       if (!active || generation !== openGeneration) return;
@@ -1107,6 +1255,42 @@
       .forEach((node) => node.removeAttribute(HIDDEN_ATTRIBUTE));
     document.querySelectorAll(`[${HOST_ATTRIBUTE}="true"]`)
       .forEach((node) => node.removeAttribute(HOST_ATTRIBUTE));
+  }
+
+  function closeNativeBrowserPanel() {
+    if (suspendedNativeBrowserPanel) return;
+    const browserPanel = Array.from(
+      document.querySelectorAll("[data-browser-sidebar-webview]"),
+    ).find((node) => window.getComputedStyle(node).visibility !== "hidden");
+    if (!browserPanel) return;
+    const webview = browserPanel.querySelector("webview");
+    suspendedNativeBrowserPanel = {
+      conversationId: webview?.getAttribute("data-browser-sidebar-conversation-id") || null,
+      browserTabId: webview?.getAttribute("data-browser-sidebar-browser-tab-id") || null,
+    };
+    window.dispatchEvent(new MessageEvent("message", {
+      data: {
+        type: "toggle-browser-panel",
+        open: false,
+        source: "manual",
+        initiator: "taskboard_open",
+      },
+    }));
+  }
+
+  function restoreNativeBrowserPanel() {
+    const browserPanel = suspendedNativeBrowserPanel;
+    suspendedNativeBrowserPanel = null;
+    if (!browserPanel) return;
+    const data = {
+      type: "toggle-browser-panel",
+      open: true,
+      source: "manual",
+      initiator: "taskboard_close",
+    };
+    if (browserPanel.conversationId) data.conversationId = browserPanel.conversationId;
+    if (browserPanel.browserTabId) data.browserTabId = browserPanel.browserTabId;
+    window.dispatchEvent(new MessageEvent("message", { data }));
   }
 
   function mountActivePage() {
@@ -1138,6 +1322,7 @@
     active = false;
     if (page) page.hidden = true;
     restoreNativeContent();
+    restoreNativeBrowserPanel();
     restoreNativeSelection();
     document.documentElement.removeAttribute("data-codex-taskboard-open");
     syncEntryState();
@@ -1150,10 +1335,11 @@
     if (destroyed) return;
     if (!active) {
       lastFocusedElement = document.activeElement;
-      hostContextSnapshot = null;
+      hostContextSnapshot = readHostContext();
     }
     const generation = ++openGeneration;
     active = true;
+    closeNativeBrowserPanel();
     ensureEntry();
     mountActivePage();
     syncEntryState();
@@ -1215,6 +1401,8 @@
         "aria-current",
       ],
     });
+    hostContextTimer = window.setInterval(postHostContext, 1_000);
+    postHostContext();
   }
 
   function destroy() {
@@ -1222,6 +1410,8 @@
     destroyed = true;
     if (reattachTimer !== null) window.clearTimeout(reattachTimer);
     reattachTimer = null;
+    if (hostContextTimer !== null) window.clearInterval(hostContextTimer);
+    hostContextTimer = null;
     observer?.disconnect();
     observer = null;
     cancelFrameReadyWaiters(new Error("任务面板已关闭"));
@@ -1234,6 +1424,7 @@
     document.removeEventListener("DOMContentLoaded", mount);
     document.removeEventListener("click", onDocumentClick, true);
     window.removeEventListener("message", onFrameMessage);
+    window.removeEventListener("message", onHostBridgeMessage);
     window.removeEventListener("popstate", onNativeRouteChange);
     window.removeEventListener("hashchange", onNativeRouteChange);
     window.removeEventListener("resize", scheduleRefresh);
@@ -1247,6 +1438,8 @@
     noDragRight = null;
     status = null;
     frameOrigin = "";
+    taskboardOrigin = "";
+    frameTaskboardUrl = "";
     if (window[SENTINEL_KEY] === api) delete window[SENTINEL_KEY];
   }
 
@@ -1257,16 +1450,19 @@
   const api = {
     version: VERSION,
     sourceHash: SOURCE_HASH,
+    get ready() {
+      return frameReady;
+    },
     refresh,
     reloadFrame,
     open: openTaskboard,
     close: closeTaskboard,
     destroy,
-    hostResponse: onHostResponse,
   };
   window[SENTINEL_KEY] = api;
 
   window.addEventListener("message", onFrameMessage);
+  window.addEventListener("message", onHostBridgeMessage);
   window.addEventListener("popstate", onNativeRouteChange);
   window.addEventListener("hashchange", onNativeRouteChange);
   window.addEventListener("resize", scheduleRefresh);

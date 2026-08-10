@@ -1,6 +1,9 @@
 import { spawn } from "node:child_process";
 import readline from "node:readline";
 
+import { resolveCodexExecutable } from "../shared/codex-executable.mjs";
+import { withoutTaskboardLauncherEnvironment } from "../shared/codex-environment.mjs";
+
 const REQUEST_TIMEOUT_MS = 8_000;
 
 export async function readCodexQuotaStatus(model) {
@@ -30,7 +33,8 @@ export async function readCodexQuotaStatus(model) {
 }
 
 function startAppServer() {
-  const child = spawn("codex", ["app-server", "--stdio"], {
+  const child = spawn(resolveCodexExecutable(), ["app-server", "--stdio"], {
+    env: withoutTaskboardLauncherEnvironment(process.env),
     stdio: ["pipe", "pipe", "ignore"],
   });
   const pending = new Map();
