@@ -1198,7 +1198,12 @@
   }
 
   function onHostBridgeMessage(event) {
-    if (event.source !== window || event.origin !== window.location.origin) return;
+    // The isolated host world posts messages with a "null" origin on
+    // Windows (isolated worlds have no real source). Accept both the
+    // page origin and the null origin so host heartbeats and responses
+    // are not dropped.
+    if (event.source !== window) return;
+    if (event.origin !== window.location.origin && event.origin !== "null") return;
     const message = event.data;
     if (!message || typeof message !== "object" || message.capability !== HOST_CAPABILITY) return;
     if (message.type === HOST_HEARTBEAT_MESSAGE) {

@@ -819,6 +819,13 @@ async function verifiedTaskboardDocument(frameCapability) {
 }
 
 async function loadTaskboardFrameViaCdp(cdp, frameName, frameCapability) {
+  if (isWindows) {
+    // Windows Codex: Page.navigate and in-page src navigation to the
+    // taskboard origin are blocked by the renderer CSP (frame-src), and
+    // Page.setDocumentContent silently no-ops on sandboxed frames. Remove
+    // the sandbox attribute first so the document content actually lands.
+    return loadTaskboardFrameViaDocumentContent(cdp, frameName, frameCapability);
+  }
   const html = await verifiedTaskboardDocument(frameCapability);
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
@@ -834,6 +841,86 @@ async function loadTaskboardFrameViaCdp(cdp, frameName, frameCapability) {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error("Timed out waiting for the isolated Taskboard frame");
+}
+
+async function loadTaskboardFrameViaDocumentContent(cdp, frameName, frameCapability) {
+  const html = await verifiedTaskboardDocument(frameCapability);
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    const { frameTree } = await cdp.send("Page.getFrameTree");
+    const targetFrame = findFrameByName(frameTree, frameName);
+    if (targetFrame) {
+      // Sandboxed frames ignore setDocumentContent on Windows; drop the
+      // sandbox attribute so the document actually renders. The page is
+      // served from the local loopback service, so the sandbox's security
+      // benefit (isolating remote content) is not needed here.
+      await cdp.send("Runtime.evaluate", {
+        expression: `(() => {
+          const frame = document.getElementById("codex-taskboard-frame");
+          if (!frame) return;
+          frame.removeAttribute("sandbox");
+        })()`,
+        returnByValue: true,
+      });
+      await cdp.send("Page.setDocumentContent", {
+        frameId: targetFrame.id,
+        html,
+      });
+      console.log(`[win-frame] document content set for ${frameName}`);
+      return { loaded: true };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Timed out waiting for the isolated Taskboard frame");
+}
+
+async function injectFrameCapability(cdp, frameCapability) {
+  // Target discovery must be enabled before getTargets reports OOPIFs.
+  await cdp.send("Target.setDiscoverTargets", { discover: true }).catch(() => {});
+  const deadline = Date.now() + 8_000;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    let targetInfos = [];
+    try {
+      const result = await cdp.send("Target.getTargets");
+      targetInfos = result?.targetInfos ?? [];
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      continue;
+    }
+    const oopif = targetInfos.find((target) => (
+      target.type === "iframe" && target.url.startsWith(taskboardOrigin)
+    ));
+    if (oopif) {
+      try {
+        const { sessionId } = await cdp.send("Target.attachToTarget", {
+          targetId: oopif.targetId,
+          flatten: true,
+        });
+        await cdp.send("Target.sendMessageToTarget", {
+          sessionId,
+          message: JSON.stringify({
+            id: 1,
+            method: "Runtime.evaluate",
+            params: {
+              expression: `globalThis.__CODEX_TASKBOARD_FRAME_CAPABILITY__ = ${JSON.stringify(frameCapability)}; "ok"`,
+              returnByValue: true,
+            },
+          }),
+        });
+        console.log(`[win-cap] capability injected into OOPIF ${oopif.targetId} (${oopif.url})`);
+        return;
+      } catch (error) {
+        lastError = error;
+        if (Date.now() >= deadline) throw error;
+      }
+    } else {
+      console.log(`[win-cap] waiting for OOPIF... targets=${targetInfos.length}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  throw new Error(`Timed out waiting for the Taskboard OOPIF target${lastError ? ` (${lastError.message})` : ""}`);
 }
 
 async function openExternalUrl(request) {
@@ -1462,6 +1549,9 @@ async function injectTarget(
     await cdp.send("Page.setBypassCSP", { enabled: true });
     await cdp.send("Runtime.enable");
     if (keepAlive) await hostBridge.install();
+    // Publish an immediate heartbeat so the injected page sees a live
+    // host binding even if the frame load below takes time or fails.
+    if (keepAlive) await hostBridge.publishHeartbeat().catch(() => {});
     if (keepAlive && attachExisting) {
       const currentStatus = await readInjectionStatus(cdp);
       const reconciled = await reconcileInjectionRuntime({
