@@ -5,6 +5,7 @@ import {
   getAutomationModel,
   withAutomationModel,
   type AutomationModel,
+  type AutomationModelOption,
   type AutomationReasoningEffort,
 } from "../../../shared/taskboard-automation-options.mjs";
 import { TaskboardIcon } from "./TaskboardIcon";
@@ -36,11 +37,12 @@ interface ProjectAutomationMenuProps {
   pending: boolean;
   error: string | null;
   unavailableReason: string | null;
+  models: AutomationModelOption[];
   onOpen: () => void;
   onChange: (options: AutomationOptions) => void;
 }
 
-const DEFAULT_OPTIONS: AutomationOptions = {
+const FALLBACK_OPTIONS: AutomationOptions = {
   enabledByUser: false,
   quotaAware: false,
   intervalMinutes: 5,
@@ -62,6 +64,7 @@ export function ProjectAutomationMenu({
   pending,
   error,
   unavailableReason,
+  models,
   onOpen,
   onChange,
 }: ProjectAutomationMenuProps) {
@@ -70,7 +73,12 @@ export function ProjectAutomationMenu({
   const wasPendingRef = useRef(pending);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
-  const [draft, setDraft] = useState<AutomationOptions>(DEFAULT_OPTIONS);
+  const [draft, setDraft] = useState<AutomationOptions>(FALLBACK_OPTIONS);
+  const availableModels = models.length > 0 ? models : AUTOMATION_MODELS;
+  const defaultOptions: AutomationOptions = {
+    ...FALLBACK_OPTIONS,
+    model: availableModels[0]?.slug ?? FALLBACK_OPTIONS.model,
+  };
   const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
   const stateLabel = !automation?.enabledByUser
@@ -88,15 +96,15 @@ export function ProjectAutomationMenu({
 
   useEffect(() => {
     if (!open) return;
-    setDraft({ ...DEFAULT_OPTIONS, ...automation });
+    setDraft({ ...defaultOptions, ...automation });
   }, [open]);
 
   useEffect(() => {
     if (wasPendingRef.current && !pending) {
-      setDraft({ ...DEFAULT_OPTIONS, ...automation });
+      setDraft({ ...defaultOptions, ...automation });
     }
     wasPendingRef.current = pending;
-  }, [automation, pending]);
+  }, [automation, pending, defaultOptions]);
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current || !menuRef.current) return;
@@ -225,7 +233,7 @@ export function ProjectAutomationMenu({
           disabled={disabled}
           onChange={(event) => submitChange(withAutomationModel(draft, event.target.value as AutomationModel))}
         >
-          {AUTOMATION_MODELS.map((model) => (
+          {availableModels.map((model) => (
             <option key={model.slug} value={model.slug}>{model.label}</option>
           ))}
         </select>
@@ -240,7 +248,9 @@ export function ProjectAutomationMenu({
             reasoningEffort: event.target.value as AutomationReasoningEffort,
           })}
         >
-          {getAutomationModel(draft.model).efforts.map((effort) => (
+          {(getAutomationModel(draft.model)?.efforts
+            ?? availableModels.find((model) => model.slug === draft.model)?.efforts
+            ?? AUTOMATION_MODELS[0].efforts).map((effort) => (
             <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>
           ))}
         </select>

@@ -36,6 +36,7 @@ function startAppServer() {
   const child = spawn(resolveCodexExecutable(), ["app-server", "--stdio"], {
     env: withoutTaskboardLauncherEnvironment(process.env),
     stdio: ["pipe", "pipe", "ignore"],
+    shell: process.platform === "win32",
   });
   const pending = new Map();
   let sequence = 0;

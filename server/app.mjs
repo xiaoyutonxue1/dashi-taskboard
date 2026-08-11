@@ -1141,6 +1141,7 @@ async function discoverSkills(codexExecutable, workspacePath, processEnv) {
       cwd: workspacePath,
       env: processEnv,
       stdio: ["pipe", "pipe", "ignore"],
+      shell: process.platform === "win32",
     });
     let settled = false;
     let buffer = "";
@@ -1255,6 +1256,7 @@ async function discoverMcpServers(codexExecutable, processEnv) {
     env: processEnv,
     timeout: 8_000,
     maxBuffer: 2 * 1024 * 1024,
+    shell: process.platform === "win32",
   });
   const entries = JSON.parse(result.stdout);
   if (!Array.isArray(entries)) throw new Error("Codex returned an invalid MCP server list");

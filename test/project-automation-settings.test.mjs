@@ -66,7 +66,13 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.doesNotMatch(menuSource, /已开启自动认领|自动认领未开启/);
   assert.match(menuSource, /自动认领开关/);
   assert.match(menuSource, /5, 10, 15, 30, 60/);
-  assert.match(menuSource, /AUTOMATION_MODELS\.map/);
+  assert.match(menuSource, /availableModels\.map/);
+  assert.match(menuSource, /const availableModels = models\.length > 0 \? models : AUTOMATION_MODELS/);
+  assert.match(menuSource, /models: AutomationModelOption\[\]/);
+  assert.match(appSource, /models=\{automationModels\}/);
+  assert.match(appSource, /const \[automationModels, setAutomationModels\] = useState/);
+  assert.match(appSource, /getAiChatCatalog\(selectedProjectId\)/);
+  assert.match(appSource, /normalizeAutomationModels\(catalog\.models\)/);
   assert.match(menuSource, /EFFORT_LABELS\[effort\]/);
   assert.match(menuSource, /createPortal/);
   assert.match(menuSource, /window\.addEventListener\("resize"/);
@@ -121,7 +127,7 @@ test("automation changes submit immediately with model-specific effort normaliza
   assert.match(menuSource, /const disabled = pending \|\| Boolean\(unavailableReason\)/);
   assert.match(menuSource, /const submitChange = \(next: AutomationOptions\) => \{[\s\S]*?setDraft\(next\);[\s\S]*?onChange\(next\);[\s\S]*?\}/);
   assert.match(menuSource, /submitChange\(withAutomationModel\(draft, event\.target\.value as AutomationModel\)\)/);
-  assert.match(menuSource, /getAutomationModel\(draft\.model\)\.efforts\.map/);
+  assert.match(menuSource, /getAutomationModel\(draft\.model\)\?\.efforts/);
   assert.match(menuSource, /<option key=\{effort\} value=\{effort\}>\{EFFORT_LABELS\[effort\]\}<\/option>/);
   assert.match(menuSource, /low: "轻度"/);
   assert.match(menuSource, /xhigh: "极高 \(xhigh\)"/);
@@ -138,7 +144,7 @@ test("pending completion reconciles the optimistic draft to confirmed host state
   assert.match(menuSource, /const wasPendingRef = useRef\(pending\)/);
   assert.match(
     menuSource,
-    /if \(wasPendingRef\.current && !pending\) \{\s*setDraft\(\{ \.\.\.DEFAULT_OPTIONS, \.\.\.automation \}\);\s*\}/,
+    /if \(wasPendingRef\.current && !pending\) \{\s*setDraft\(\{ \.\.\.defaultOptions, \.\.\.automation \}\);\s*\}/,
   );
   assert.match(menuSource, /wasPendingRef\.current = pending/);
   assert.match(menuSource, /disabled=\{disabled\}/);

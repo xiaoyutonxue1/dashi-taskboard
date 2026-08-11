@@ -140,6 +140,8 @@ function listSkills(codexExecutable, workspacePath, processEnv) {
       cwd: workspacePath,
       env: processEnv,
       stdio: ["pipe", "pipe", "ignore"],
+      // Windows resolves npm-installed .cmd shims; shell handles them.
+      shell: process.platform === "win32",
     });
     let buffer = "";
     let settled = false;
@@ -261,6 +263,8 @@ export async function discoverAiCatalog({
       encoding: "utf8",
       timeout: CATALOG_TIMEOUT_MS,
       maxBuffer: CATALOG_MAX_BUFFER,
+      // Windows npm-installed .cmd shims require shell execution.
+      shell: process.platform === "win32",
     }),
     listSkills(codexExecutable, workspacePath, environment),
   ]);

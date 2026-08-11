@@ -2,6 +2,8 @@ import { accessSync, constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+const WINDOWS_EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat", ".com"];
+
 function executableFile(candidate) {
   try {
     accessSync(candidate, constants.X_OK);
@@ -11,11 +13,18 @@ function executableFile(candidate) {
   }
 }
 
-function executableOnPath(env) {
+function executableOnPath(env, platform) {
   for (const directory of (env.PATH || "").split(path.delimiter)) {
     if (!directory) continue;
-    const candidate = executableFile(path.join(directory, "codex"));
-    if (candidate) return candidate;
+    const candidates = platform === "win32"
+      ? WINDOWS_EXECUTABLE_EXTENSIONS.map(
+          (extension) => path.join(directory, `codex${extension}`),
+        )
+      : [path.join(directory, "codex")];
+    for (const candidate of candidates) {
+      const resolved = executableFile(candidate);
+      if (resolved) return resolved;
+    }
   }
   return null;
 }
@@ -38,7 +47,7 @@ export function resolveCodexExecutable({
     if (bundled) return bundled;
   }
 
-  const installedCli = executableOnPath(env);
+  const installedCli = executableOnPath(env, platform);
   if (installedCli) return installedCli;
 
   if (platform === "darwin") {

@@ -15,7 +15,9 @@ import {
   isAutomationModel,
   isAutomationReasoningEffort,
   isSupportedModelEffort,
+  normalizeAutomationModels,
   type AutomationModel,
+  type AutomationModelOption,
   type AutomationReasoningEffort,
 } from "../../shared/taskboard-automation-options.mjs";
 import {
@@ -26,6 +28,7 @@ import {
   createTask as createTaskRequest,
   deleteArchivedTask as deleteArchivedTaskRequest,
   deleteProject as deleteProjectRequest,
+  getAiChatCatalog,
   getCodexThreadProgress,
   getHostRuntime,
   getTaskboardRevision,
@@ -644,6 +647,7 @@ export function App() {
   const [projectAutomations, setProjectAutomations] = useState(readProjectAutomations);
   const [automationPending, setAutomationPending] = useState(false);
   const [automationError, setAutomationError] = useState<string | null>(null);
+  const [automationModels, setAutomationModels] = useState<AutomationModelOption[]>([]);
   const [announcement, setAnnouncementValue] = useState("");
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
@@ -916,6 +920,17 @@ export function App() {
     selectedProjectId,
   ]);
 
+  const refreshAutomationModels = useCallback(async () => {
+    if (!selectedProjectId) return;
+    try {
+      const catalog = await getAiChatCatalog(selectedProjectId);
+      const models = normalizeAutomationModels(catalog.models);
+      if (models.length > 0) setAutomationModels(models);
+    } catch {
+      // Catalog may be unavailable; keep the static fallback list.
+    }
+  }, [selectedProjectId]);
+
   const reconcileProjectAutomation = useCallback(async () => {
     if (automationProjectContext.unavailableReason) {
       setAutomationError(null);
@@ -926,10 +941,16 @@ export function App() {
     automationRequestInFlightRef.current = true;
     setAutomationPending(true);
     setAutomationError(null);
+    // Refresh the live model list in the background so the automation menu
+    // reflects provider-mapped models (e.g. Cockpit Tools) instead of the
+    // hardcoded default set. Failures keep the static fallback.
+    void refreshAutomationModels();
     try {
+      const defaultModel = automationModels[0]?.slug ?? DEFAULT_AUTOMATION_OPTIONS.model;
       const options = stored ?? {
         status: "PAUSED" as const,
         ...DEFAULT_AUTOMATION_OPTIONS,
+        model: defaultModel,
       };
       const response = await sendAutomationRequest(
         "list",
@@ -1001,6 +1022,8 @@ export function App() {
     }
   }, [
     automationProjectContext,
+    automationModels,
+    refreshAutomationModels,
     selectedProjectId,
     sendAutomationRequest,
     writeProjectAutomation,
@@ -2369,6 +2392,7 @@ export function App() {
                 pending={automationPending}
                 error={automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
+                models={automationModels}
                 onOpen={() => void reconcileProjectAutomation()}
                 onChange={(options) => void saveProjectAutomation(options)}
               />

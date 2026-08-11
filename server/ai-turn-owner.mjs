@@ -7,6 +7,8 @@ if (!executable || !encodedArgs) process.exit(2);
 const child = spawn(executable, JSON.parse(encodedArgs), {
   env: process.env,
   stdio: "inherit",
+  // Windows npm-installed .cmd shims require shell execution.
+  shell: process.platform === "win32",
 });
 
 const control = new Socket({ fd: 3, readable: true, writable: false });

@@ -11,7 +11,9 @@ import {
 } from "../shared/taskboard-automation.mjs";
 import {
   AUTOMATION_MODELS,
+  isAutomationModel,
   isSupportedModelEffort,
+  normalizeAutomationModels,
   withAutomationModel,
 } from "../shared/taskboard-automation-options.mjs";
 
@@ -119,9 +121,25 @@ test("the automation host request accepts only whitelisted project automation op
     })?.reasoningEffort,
     "ultra",
   );
-  assert.equal(
+  assert.deepEqual(
     parseTaskboardAutomationHostRequest({ ...baseRequest, model: "gpt-future" }),
-    null,
+    { ...baseRequest, model: "gpt-future" },
+  );
+  assert.equal(
+    parseTaskboardAutomationHostRequest({
+      ...baseRequest,
+      model: "kimi-k3",
+      reasoningEffort: "high",
+    })?.model,
+    "kimi-k3",
+  );
+  assert.equal(
+    parseTaskboardAutomationHostRequest({
+      ...baseRequest,
+      model: "deepseek-v4-flash",
+      reasoningEffort: "medium",
+    })?.model,
+    "deepseek-v4-flash",
   );
   assert.equal(
     parseTaskboardAutomationHostRequest({ ...baseRequest, reasoningEffort: "xhigh" })?.reasoningEffort,
@@ -481,4 +499,81 @@ test("pause is idempotent for an already paused matching automation", async () =
   );
   assert.deepEqual(calls, [{ method: "list-automations", params: {} }]);
   assert.deepEqual(response, { item: matching });
+});
+
+test("unknown models are accepted leniently and normalized from the live catalog", () => {
+  // Unknown provider-mapped models pass effort validation and model checks.
+  assert.equal(isAutomationModel("kimi-k3"), true);
+  assert.equal(isAutomationModel("deepseek-v4-flash"), true);
+  assert.equal(isAutomationModel(""), false);
+  assert.equal(isSupportedModelEffort("kimi-k3", "high"), true);
+  assert.equal(isSupportedModelEffort("deepseek-v4-flash", "medium"), true);
+  // Known models still validate strictly.
+  assert.equal(isSupportedModelEffort("gpt-5.4", "ultra"), false);
+
+  // withAutomationModel keeps the current effort for unknown models.
+  const current = {
+    status: "ACTIVE",
+    intervalMinutes: 5,
+    model: "gpt-5.5",
+    reasoningEffort: "high",
+  };
+  assert.deepEqual(withAutomationModel(current, "kimi-k3"), {
+    ...current,
+    model: "kimi-k3",
+  });
+  assert.deepEqual(withAutomationModel(current, "deepseek-v4-flash"), {
+    ...current,
+    model: "deepseek-v4-flash",
+    reasoningEffort: "high",
+  });
+});
+
+test("normalizeAutomationModels maps catalog models to automation options", () => {
+  const catalog = [
+    {
+      slug: "kimi-k3",
+      displayName: "Kimi K3",
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: ["low", "medium", "high"],
+    },
+    {
+      slug: "deepseek-v4-flash",
+      displayName: "DeepSeek V4 Flash",
+      defaultReasoningEffort: "low",
+      supportedReasoningEfforts: ["low", "medium"],
+    },
+    {
+      slug: "no-efforts",
+      displayName: "No Efforts Model",
+      defaultReasoningEffort: "xhigh",
+      supportedReasoningEfforts: [],
+    },
+  ];
+  const normalized = normalizeAutomationModels(catalog);
+  assert.deepEqual(normalized, [
+    {
+      label: "Kimi K3",
+      slug: "kimi-k3",
+      defaultEffort: "medium",
+      efforts: ["low", "medium", "high"],
+    },
+    {
+      label: "DeepSeek V4 Flash",
+      slug: "deepseek-v4-flash",
+      defaultEffort: "low",
+      efforts: ["low", "medium"],
+    },
+    {
+      label: "No Efforts Model",
+      slug: "no-efforts",
+      // Unsupported default effort falls back to the first supported one.
+      defaultEffort: "low",
+      efforts: ["low", "medium", "high", "xhigh"],
+    },
+  ]);
+  // Empty or malformed input returns an empty list.
+  assert.deepEqual(normalizeAutomationModels([]), []);
+  assert.deepEqual(normalizeAutomationModels(null), []);
+  assert.deepEqual(normalizeAutomationModels([{ slug: "" }]), []);
 });
