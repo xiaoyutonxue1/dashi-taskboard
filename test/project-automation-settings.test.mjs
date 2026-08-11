@@ -67,11 +67,12 @@ test("the project navigation automation menu owns the icon, fields, and accessib
   assert.match(menuSource, /自动认领开关/);
   assert.match(menuSource, /5, 10, 15, 30, 60/);
   assert.match(menuSource, /availableModels\.map/);
-  assert.match(menuSource, /const availableModels = models\.length > 0 \? models : AUTOMATION_MODELS/);
+  assert.match(menuSource, /const \[displayModels, setDisplayModels\] = useState/);
+  assert.match(menuSource, /setDisplayModels\(models\.length > 0 \? models : AUTOMATION_MODELS\)/);
   assert.match(menuSource, /models: AutomationModelOption\[\]/);
   assert.match(appSource, /models=\{automationModels\}/);
   assert.match(appSource, /const \[automationModels, setAutomationModels\] = useState/);
-  assert.match(appSource, /getAiChatCatalog\(selectedProjectId\)/);
+  assert.match(appSource, /getAiChatCatalog\(projectId/);
   assert.match(appSource, /normalizeAutomationModels\(catalog\.models\)/);
   assert.match(menuSource, /EFFORT_LABELS\[effort\]/);
   assert.match(menuSource, /createPortal/);

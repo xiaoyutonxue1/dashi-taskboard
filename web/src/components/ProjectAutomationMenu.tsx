@@ -74,7 +74,12 @@ export function ProjectAutomationMenu({
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
   const [draft, setDraft] = useState<AutomationOptions>(FALLBACK_OPTIONS);
-  const availableModels = models.length > 0 ? models : AUTOMATION_MODELS;
+  // Snapshot the model list when the menu opens and keep it stable for the
+  // whole interaction. Reloading models (async catalog) while the native
+  // <select> dropdown is open replaces the <option> list and collapses the
+  // dropdown; the snapshot prevents that.
+  const [displayModels, setDisplayModels] = useState<readonly AutomationModelOption[]>([]);
+  const availableModels = displayModels.length > 0 ? displayModels : AUTOMATION_MODELS;
   const defaultOptions: AutomationOptions = {
     ...FALLBACK_OPTIONS,
     model: availableModels[0]?.slug ?? FALLBACK_OPTIONS.model,
@@ -96,6 +101,8 @@ export function ProjectAutomationMenu({
 
   useEffect(() => {
     if (!open) return;
+    // Take a fresh snapshot of the latest models whenever the menu opens.
+    setDisplayModels(models.length > 0 ? models : AUTOMATION_MODELS);
     setDraft({ ...defaultOptions, ...automation });
   }, [open]);
 

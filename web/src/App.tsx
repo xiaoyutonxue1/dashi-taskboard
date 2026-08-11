@@ -920,10 +920,10 @@ export function App() {
     selectedProjectId,
   ]);
 
-  const refreshAutomationModels = useCallback(async () => {
-    if (!selectedProjectId) return;
+  const refreshAutomationModels = useCallback(async (projectId: string = selectedProjectId) => {
+    if (!projectId) return;
     try {
-      const catalog = await getAiChatCatalog(selectedProjectId);
+      const catalog = await getAiChatCatalog(projectId);
       const models = normalizeAutomationModels(catalog.models);
       if (models.length > 0) setAutomationModels(models);
     } catch {
@@ -941,10 +941,9 @@ export function App() {
     automationRequestInFlightRef.current = true;
     setAutomationPending(true);
     setAutomationError(null);
-    // Refresh the live model list in the background so the automation menu
-    // reflects provider-mapped models (e.g. Cockpit Tools) instead of the
-    // hardcoded default set. Failures keep the static fallback.
-    void refreshAutomationModels();
+    // The live model list is preloaded on project switch (changeProject);
+    // do not reload here so the menu's <option> list never changes while
+    // the user is interacting with the model dropdown.
     try {
       const defaultModel = automationModels[0]?.slug ?? DEFAULT_AUTOMATION_OPTIONS.model;
       const options = stored ?? {
@@ -2131,6 +2130,11 @@ export function App() {
     setUndoNotice(null);
     const url = buildIssueUrl(window.location.href, projectId, null);
     window.history.replaceState(null, "", url);
+    // Preload the live model list on project switch so the automation
+    // menu's model dropdown is stable when opened; loading it lazily on
+    // menu open replaces the <option> list mid-interaction and collapses
+    // the native select dropdown.
+    void refreshAutomationModels(projectId);
   }
 
   async function selectProject(choice: ProjectChoice) {
