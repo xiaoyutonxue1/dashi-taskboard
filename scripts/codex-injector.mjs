@@ -866,6 +866,10 @@ async function loadTaskboardFrameViaDocumentContent(cdp, frameName, frameCapabil
         frameId: targetFrame.id,
         html,
       });
+      // The renderer's CSP is re-asserted when the document is replaced;
+      // re-enable the bypass so the taskboard can fetch its API, SSE events
+      // and catalog from the loopback origin.
+      await cdp.send("Page.setBypassCSP", { enabled: true }).catch(() => {});
       console.log(`[win-frame] document content set for ${frameName}`);
       return { loaded: true };
     }
@@ -1620,6 +1624,12 @@ async function injectTarget(
       : false;
     if (shouldOpen && (!status.frameReady || !frameLoaded)) {
       throw new Error("Taskboard frame did not report ready in the Codex renderer");
+    }
+    // Re-assert the CSP bypass after the frame is ready. On Windows the
+    // replaced document resets the renderer's CSP, which would otherwise
+    // block the taskboard's API/SSE/catalog fetches to the loopback origin.
+    if (isWindows) {
+      await cdp.send("Page.setBypassCSP", { enabled: true }).catch(() => {});
     }
     const result = {
       ...status,

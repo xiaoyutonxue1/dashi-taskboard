@@ -15,9 +15,7 @@ import {
   isAutomationModel,
   isAutomationReasoningEffort,
   isSupportedModelEffort,
-  normalizeAutomationModels,
   type AutomationModel,
-  type AutomationModelOption,
   type AutomationReasoningEffort,
 } from "../../shared/taskboard-automation-options.mjs";
 import {
@@ -28,7 +26,6 @@ import {
   createTask as createTaskRequest,
   deleteArchivedTask as deleteArchivedTaskRequest,
   deleteProject as deleteProjectRequest,
-  getAiChatCatalog,
   getCodexThreadProgress,
   getHostRuntime,
   getTaskboardRevision,
@@ -647,7 +644,6 @@ export function App() {
   const [projectAutomations, setProjectAutomations] = useState(readProjectAutomations);
   const [automationPending, setAutomationPending] = useState(false);
   const [automationError, setAutomationError] = useState<string | null>(null);
-  const [automationModels, setAutomationModels] = useState<AutomationModelOption[]>([]);
   const [announcement, setAnnouncementValue] = useState("");
   const [undoNotice, setUndoNotice] = useState<UndoNotice | null>(null);
   const tasksRequestRef = useRef(0);
@@ -920,17 +916,6 @@ export function App() {
     selectedProjectId,
   ]);
 
-  const refreshAutomationModels = useCallback(async (projectId: string = selectedProjectId) => {
-    if (!projectId) return;
-    try {
-      const catalog = await getAiChatCatalog(projectId);
-      const models = normalizeAutomationModels(catalog.models);
-      if (models.length > 0) setAutomationModels(models);
-    } catch {
-      // Catalog may be unavailable; keep the static fallback list.
-    }
-  }, [selectedProjectId]);
-
   const reconcileProjectAutomation = useCallback(async () => {
     if (automationProjectContext.unavailableReason) {
       setAutomationError(null);
@@ -941,15 +926,10 @@ export function App() {
     automationRequestInFlightRef.current = true;
     setAutomationPending(true);
     setAutomationError(null);
-    // The live model list is preloaded on project switch (changeProject);
-    // do not reload here so the menu's <option> list never changes while
-    // the user is interacting with the model dropdown.
     try {
-      const defaultModel = automationModels[0]?.slug ?? DEFAULT_AUTOMATION_OPTIONS.model;
       const options = stored ?? {
         status: "PAUSED" as const,
         ...DEFAULT_AUTOMATION_OPTIONS,
-        model: defaultModel,
       };
       const response = await sendAutomationRequest(
         "list",
@@ -1021,8 +1001,6 @@ export function App() {
     }
   }, [
     automationProjectContext,
-    automationModels,
-    refreshAutomationModels,
     selectedProjectId,
     sendAutomationRequest,
     writeProjectAutomation,
@@ -2130,11 +2108,6 @@ export function App() {
     setUndoNotice(null);
     const url = buildIssueUrl(window.location.href, projectId, null);
     window.history.replaceState(null, "", url);
-    // Preload the live model list on project switch so the automation
-    // menu's model dropdown is stable when opened; loading it lazily on
-    // menu open replaces the <option> list mid-interaction and collapses
-    // the native select dropdown.
-    void refreshAutomationModels(projectId);
   }
 
   async function selectProject(choice: ProjectChoice) {
@@ -2396,7 +2369,6 @@ export function App() {
                 pending={automationPending}
                 error={automationError}
                 unavailableReason={automationProjectContext.unavailableReason}
-                models={automationModels}
                 onOpen={() => void reconcileProjectAutomation()}
                 onChange={(options) => void saveProjectAutomation(options)}
               />

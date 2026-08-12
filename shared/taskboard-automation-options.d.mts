@@ -1,4 +1,10 @@
-export type AutomationModel = string;
+export type AutomationModel =
+  | "gpt-5.6-sol"
+  | "gpt-5.6-terra"
+  | "gpt-5.6-luna"
+  | "gpt-5.5"
+  | "gpt-5.4"
+  | "gpt-5.4-mini";
 
 export type AutomationReasoningEffort =
   | "low"
@@ -27,14 +33,6 @@ export function isSupportedModelEffort(
   model: unknown,
   effort: unknown,
 ): model is AutomationModel;
-export function normalizeAutomationModels(
-  catalogModels: Array<{
-    slug: string;
-    displayName?: string;
-    defaultReasoningEffort?: string;
-    supportedReasoningEfforts?: string[];
-  }>,
-): AutomationModelOption[];
 export function withAutomationModel<
   T extends { model: AutomationModel; reasoningEffort: AutomationReasoningEffort },
 >(

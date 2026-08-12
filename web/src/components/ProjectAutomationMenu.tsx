@@ -5,7 +5,6 @@ import {
   getAutomationModel,
   withAutomationModel,
   type AutomationModel,
-  type AutomationModelOption,
   type AutomationReasoningEffort,
 } from "../../../shared/taskboard-automation-options.mjs";
 import { TaskboardIcon } from "./TaskboardIcon";
@@ -37,12 +36,11 @@ interface ProjectAutomationMenuProps {
   pending: boolean;
   error: string | null;
   unavailableReason: string | null;
-  models: AutomationModelOption[];
   onOpen: () => void;
   onChange: (options: AutomationOptions) => void;
 }
 
-const FALLBACK_OPTIONS: AutomationOptions = {
+const DEFAULT_OPTIONS: AutomationOptions = {
   enabledByUser: false,
   quotaAware: false,
   intervalMinutes: 5,
@@ -64,7 +62,6 @@ export function ProjectAutomationMenu({
   pending,
   error,
   unavailableReason,
-  models,
   onOpen,
   onChange,
 }: ProjectAutomationMenuProps) {
@@ -73,17 +70,7 @@ export function ProjectAutomationMenu({
   const wasPendingRef = useRef(pending);
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState({ left: 0, top: 0, ready: false });
-  const [draft, setDraft] = useState<AutomationOptions>(FALLBACK_OPTIONS);
-  // Snapshot the model list when the menu opens and keep it stable for the
-  // whole interaction. Reloading models (async catalog) while the native
-  // <select> dropdown is open replaces the <option> list and collapses the
-  // dropdown; the snapshot prevents that.
-  const [displayModels, setDisplayModels] = useState<readonly AutomationModelOption[]>([]);
-  const availableModels = displayModels.length > 0 ? displayModels : AUTOMATION_MODELS;
-  const defaultOptions: AutomationOptions = {
-    ...FALLBACK_OPTIONS,
-    model: availableModels[0]?.slug ?? FALLBACK_OPTIONS.model,
-  };
+  const [draft, setDraft] = useState<AutomationOptions>(DEFAULT_OPTIONS);
   const status = automation?.status ?? "PAUSED";
   const quota = automation?.quota;
   const stateLabel = !automation?.enabledByUser
@@ -101,17 +88,15 @@ export function ProjectAutomationMenu({
 
   useEffect(() => {
     if (!open) return;
-    // Take a fresh snapshot of the latest models whenever the menu opens.
-    setDisplayModels(models.length > 0 ? models : AUTOMATION_MODELS);
-    setDraft({ ...defaultOptions, ...automation });
+    setDraft({ ...DEFAULT_OPTIONS, ...automation });
   }, [open]);
 
   useEffect(() => {
     if (wasPendingRef.current && !pending) {
-      setDraft({ ...defaultOptions, ...automation });
+      setDraft({ ...DEFAULT_OPTIONS, ...automation });
     }
     wasPendingRef.current = pending;
-  }, [automation, pending, defaultOptions]);
+  }, [automation, pending]);
 
   useLayoutEffect(() => {
     if (!open || !triggerRef.current || !menuRef.current) return;
@@ -240,7 +225,7 @@ export function ProjectAutomationMenu({
           disabled={disabled}
           onChange={(event) => submitChange(withAutomationModel(draft, event.target.value as AutomationModel))}
         >
-          {availableModels.map((model) => (
+          {AUTOMATION_MODELS.map((model) => (
             <option key={model.slug} value={model.slug}>{model.label}</option>
           ))}
         </select>
@@ -255,9 +240,7 @@ export function ProjectAutomationMenu({
             reasoningEffort: event.target.value as AutomationReasoningEffort,
           })}
         >
-          {(getAutomationModel(draft.model)?.efforts
-            ?? availableModels.find((model) => model.slug === draft.model)?.efforts
-            ?? AUTOMATION_MODELS[0].efforts).map((effort) => (
+          {getAutomationModel(draft.model).efforts.map((effort) => (
             <option key={effort} value={effort}>{EFFORT_LABELS[effort]}</option>
           ))}
         </select>
